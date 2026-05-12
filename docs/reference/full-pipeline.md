@@ -1,0 +1,3 @@
+# FullPipeline
+
+::: minikafka.FullPipeline

@@ -23,6 +23,11 @@ test = [
     "ruff>=0.8",
     "polars>=0.20",
 ]
+docs = [
+    "zensical",
+    "mkdocstrings",
+    "mkdocstrings-python",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

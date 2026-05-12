@@ -1,0 +1,3 @@
+# Topic
+
+::: minikafka.Topic
