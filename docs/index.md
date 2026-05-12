@@ -8,23 +8,27 @@ over time.
 
 You've probably been here: a cron pulls some
 RSS feeds, another script summarizes them with a local LLM, a third
-shoves the result into your reader. Each piece works in isolation. The
-hard part isn't the work — it's the **state** holding them together.
-What did the scraper already see? Which items were summarized? Which
-ones failed and need a retry?
+shoves the result into your reader. Maybe you start by writing stuff
+into files here and there, or maybe some tables with schemas if you
+want to get fancy. 
 
-You can reach for a "real" queue (Kafka, Redis Streams) but for a
-homelab they're enormous, operationally fussy, and they don't really fit
-in a single process. You can reach for a scheduler like Prefect or
-Airflow — and you probably should, for the heartbeats and the dashboards
-— but neither answers "what's the durable state between runs?"
+Then comes the moment when you want to expand. Maybe you want the RSS
+feed to go to another pipeline if it contains a YouTube video. Suddely
+it starts to be hard to keep everything in your head. What did the scraper 
+already see? Which items were summarized? Which ones failed and need a retry? 
+
+You want to keep things simple so you don't want to double-down on something 
+like Kafka. You might want to introduce prefect, sure, but that's just for 
+scheduling. It does not answer "what's the durable state between runs?"
 
 That's the gap minikafka fills. A `Source` is one SQLite file on disk.
 A `Topic` is a typed, append-only log inside that file. Pipelines
-consume one topic and produce another, transactionally, so a crash in
+consume one topic and produce another. It's all transactionally, so a crash in
 the middle of an LLM call doesn't leave the next run confused. Pair it
 with Prefect (or just cron) for the *when*, and let minikafka own the
 *what's-already-done*.
+
+It makes small homelab projects *loads* of fun.
 
 ## What you get
 
@@ -97,6 +101,42 @@ The next time this script runs, the `dedup=("url",)` constraint on
 `items` makes the same RSS URL a no-op, and `summaries` only sees rows
 the pipeline hasn't already handled. The whole thing is one
 `homelab.sqlite` file — back it up like any other.
+
+## Going bigger?
+
+Once you have a few topics it usually doesn't stop at one
+`topic.pipe(...)`. Maybe you want a parser to split YouTube items off
+from regular RSS, a cleaner for each branch, and a scorer that fans
+back in. That's where `Source.full_pipeline(...)` comes in: pass any
+number of `topic.pipe(fn).to(target)` arms and minikafka runs them as
+one DAG, in topological order, with one shared transaction per row.
+
+```python
+source.full_pipeline(
+    items.pipe(split_youtube).to(youtube_items),
+    items.pipe(keep_articles).to(article_items),
+    youtube_items.pipe(transcribe).to(summaries),
+    article_items.pipe(llm_summary).to(summaries),
+    summaries.pipe(score).to(scored),
+).run()
+```
+
+```mermaid
+graph TD
+    items --> youtube_items
+    items --> article_items
+    youtube_items --> summaries
+    article_items --> summaries
+    summaries --> scored
+```
+
+Two siblings fan out from `items`, two more fan back in to `summaries`,
+and `score` runs downstream — all from a single call. Add
+`strategy="best_effort"` if you'd rather collect failures than abort the
+whole run (handy when one of your LLM calls is flaky).
+
+See [Fan-out & fan-in](concepts/fan-out.md) for the strict vs.
+best-effort tradeoff, retry semantics, and `FanOutError` details.
 
 ## Next steps
 
