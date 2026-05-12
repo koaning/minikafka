@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slimlink"
+version = "0.1.0"
+description = "A tiny typed SQLite-backed queue for Python."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+demo = [
+    "marimo>=0.10",
+    "polars>=0.20",
+]
+polars = ["polars>=0.20"]
+test = [
+    "pytest>=8",
+    "ruff>=0.8",
+    "polars>=0.20",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/demo.py" = ["B018"]
