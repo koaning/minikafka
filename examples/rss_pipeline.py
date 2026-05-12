@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from slimlink import Source
+from minikafka import Source
 
 
 class RawYouTube(BaseModel):
