@@ -1,3 +1,16 @@
+"""Core implementation of minikafka.
+
+Defines the public surface of the library:
+
+- ``Source`` — a connection to a SQLite database that holds one or more topics.
+- ``Topic`` — a typed, append-only queue backed by a Pydantic model.
+- ``Pipeline`` and ``FullPipeline`` — chain transformations between topics,
+  with single-source and multi-source (fan-out / fan-in) variants.
+- ``Record`` — a frozen dataclass returned when iterating topics with
+  ``records=True``, exposing storage metadata alongside the decoded payload.
+- Exception hierarchy rooted at ``MinikafkaError``.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -31,6 +44,21 @@ class DuplicateMessageError(MinikafkaError):
 
 @dataclass(frozen=True)
 class FanOutFailure:
+    """A single sibling failure recorded during a ``best_effort`` fan-out run.
+
+    Instances are collected on the ``failures`` list of ``FanOutError`` when
+    ``FullPipeline.run(strategy="best_effort")`` is used. The parent record
+    that triggered the failure is left in the ``new`` state so a corrected
+    run can retry it.
+
+    Attributes:
+        record_id: Primary key of the parent record in its source topic.
+        source: Name of the topic that produced the record.
+        target: Name of the target topic the sibling pipeline was writing to,
+            or ``None`` if the pipeline had no target.
+        exception: The original exception raised by the sibling pipeline.
+    """
+
     record_id: int
     source: str
     target: str | None
@@ -67,6 +95,32 @@ class FanOutError(MinikafkaError):
 
 @dataclass(frozen=True)
 class Record(Generic[ModelT]):
+    """A stored message returned by ``Topic.iter_new`` / ``Topic.iter_handled``.
+
+    Records wrap the decoded Pydantic payload with the storage metadata kept
+    in SQLite. They are immutable; use ``Topic.set_handled`` to transition
+    a record from ``new`` to ``handled``.
+
+    Attributes:
+        id: Auto-incrementing primary key, unique within the database.
+        topic: Name of the topic the record belongs to.
+        created_at: UTC timestamp of when the record was inserted.
+        handled_at: UTC timestamp of when the record was acknowledged, or
+            ``None`` if it is still in the ``new`` state.
+        status: Either ``"new"`` or ``"handled"``.
+        payload_hash: SHA-256 over the canonical JSON of the full payload.
+        dedup_hash: SHA-256 over the dedup-field subset, or ``None`` when
+            the topic has no dedup configuration.
+        data: The decoded Pydantic model instance.
+
+    Examples:
+        ```python
+        for record in topic.iter_new(records=True):
+            print(record.id, record.created_at, record.data)
+            topic.set_handled(record=record)
+        ```
+    """
+
     id: int
     topic: str
     created_at: datetime
@@ -128,7 +182,12 @@ def _model_to_payload(model: BaseModel) -> dict[str, Any]:
 
 
 class Source:
-    """SQLite-backed queue source.
+    """SQLite-backed queue source — entry point to minikafka.
+
+    A ``Source`` owns a single SQLite connection and tracks the Pydantic
+    model classes registered to its topics. Use ``Source.topic`` to
+    create or attach to a topic, and ``Source.full_pipeline`` to compose
+    multi-topic pipelines.
 
     Pass ``on_event`` to observe activity. The callable is invoked as
     ``on_event(event_name, **kwargs)`` for these events:
@@ -141,6 +200,20 @@ class Source:
 
     Exceptions raised inside ``on_event`` are swallowed so logging cannot
     break the pipeline.
+
+    Examples:
+        ```python
+        from pydantic import BaseModel
+        from minikafka import Source
+
+        class Video(BaseModel):
+            url: str
+            title: str
+
+        source = Source(":memory:")
+        videos = source.topic("videos", Video, dedup=("url",))
+        videos.append({"url": "https://example.com", "title": "hello"})
+        ```
     """
 
     def __init__(
@@ -149,6 +222,15 @@ class Source:
         *,
         on_event: Callable[..., None] | None = None,
     ):
+        """Open or create a SQLite-backed source.
+
+        Args:
+            path: Path to the SQLite database file. Use ``":memory:"`` for
+                an in-process database that is discarded on ``close()``.
+            on_event: Optional observer callback invoked as
+                ``on_event(event_name, **kwargs)``. See the class docstring
+                for the event names and their kwargs.
+        """
         self.path = str(path)
         self._on_event = on_event
         self._conn = sqlite3.connect(self.path)
@@ -171,6 +253,37 @@ class Source:
         *,
         dedup: Sequence[str] | None,
     ) -> Topic[ModelT]:
+        """Create or attach to a typed topic.
+
+        If the topic does not exist in the database it is created with the
+        given model's JSON schema and dedup fields. If it already exists,
+        both the schema hash and the dedup-field tuple must match — if
+        either differs, ``SchemaMismatchError`` is raised.
+
+        The model class is also remembered on this ``Source`` instance so
+        that pipelines can resolve topics by name and return decoded
+        Pydantic instances.
+
+        Args:
+            name: Topic name. Must be stable across reopens.
+            model: Pydantic ``BaseModel`` subclass describing the payload.
+            dedup: Tuple of field names (must all exist on ``model``) used
+                to enforce uniqueness, or ``None`` to disable dedup.
+
+        Returns:
+            A ``Topic[ModelT]`` bound to this source.
+
+        Raises:
+            SchemaMismatchError: The topic exists with a different schema
+                or different dedup configuration.
+            TypeError: ``model`` is not a Pydantic ``BaseModel`` subclass.
+            ValueError: ``dedup`` references fields that are not on
+                ``model``, or contains duplicates.
+
+        Emits:
+            ``topic_created`` only when a new row is inserted in the
+            ``topics`` table (not when re-attaching to an existing topic).
+        """
         model = _validate_model_class(model)  # type: ignore[assignment]
         dedup_fields = _validate_dedup_fields(model, dedup)
         schema = _schema_for(model)
@@ -210,9 +323,37 @@ class Source:
         return Topic(self, name, model)
 
     def full_pipeline(self, *pipelines: Pipeline[Any, Any]) -> FullPipeline:
+        """Compose multiple pipelines into a single executable DAG.
+
+        Pipelines that share a source topic become **siblings** (fan-out);
+        pipelines whose target is another pipeline's source form a chain
+        (fan-in). The resulting ``FullPipeline`` runs source topics in
+        topological order so that downstream pipelines see the rows
+        produced upstream within the same ``run()`` call.
+
+        Args:
+            *pipelines: Any number of ``Pipeline`` instances built via
+                ``topic.pipe(fn).to(target)``.
+
+        Returns:
+            A ``FullPipeline`` ready to ``run()`` or ``plot()``.
+
+        Examples:
+            ```python
+            source.full_pipeline(
+                raw.pipe(clean).to(clean_topic),
+                clean_topic.pipe(score).to(feed),
+            ).run()
+            ```
+        """
         return FullPipeline(list(pipelines))
 
     def close(self) -> None:
+        """Close the underlying SQLite connection.
+
+        After calling ``close`` the ``Source`` (and any ``Topic`` /
+        ``Pipeline`` referencing it) can no longer be used.
+        """
         self._conn.close()
 
     def _init_db(self) -> None:
@@ -265,12 +406,68 @@ class Source:
 
 
 class Topic(Generic[ModelT]):
+    """Typed, append-only queue backed by a Pydantic model.
+
+    A ``Topic`` is a logical message log inside a ``Source``. Every record
+    is validated against the topic's ``model`` before insert and may be
+    deduplicated on a chosen tuple of fields. Records start in the ``new``
+    state and transition to ``handled`` once acknowledged via
+    ``set_handled`` or by being consumed by a pipeline.
+
+    Use ``iter_new`` to stream pending work and ``set_handled`` to ack a
+    record. To transform a topic into another, use
+    ``topic.pipe(fn).to(target)`` and call ``run()`` on the resulting
+    ``Pipeline``.
+
+    Topics are created with ``Source.topic`` — do not construct directly.
+
+    Attributes:
+        source: The owning ``Source``.
+        name: Topic name (matches the row in the ``topics`` SQLite table).
+        model: The Pydantic ``BaseModel`` subclass for this topic.
+
+    Examples:
+        ```python
+        videos = source.topic("videos", Video, dedup=("url",))
+        videos.append({"url": "https://x", "title": "hi"})
+
+        for record in videos.iter_new(records=True):
+            print(record.id, record.data.title)
+            videos.set_handled(record=record)
+        ```
+    """
+
     def __init__(self, source: Source, name: str, model: type[ModelT]):
         self.source = source
         self.name = name
         self.model = model
 
     def append(self, payload: ModelT | dict[str, Any]) -> ModelT:
+        """Validate and insert a new record into the topic.
+
+        The payload is validated against the topic's model (raising
+        ``pydantic.ValidationError`` on mismatch) and then inserted as a
+        new ``status='new'`` row. If the topic has dedup fields configured
+        and another row already exists with the same dedup values,
+        ``DuplicateMessageError`` is raised.
+
+        Args:
+            payload: Either a Pydantic model instance of the topic's type
+                or a ``dict`` that can be coerced into one.
+
+        Returns:
+            The validated Pydantic model instance that was stored.
+
+        Raises:
+            DuplicateMessageError: A row with the same dedup fields already
+                exists in this topic.
+            pydantic.ValidationError: The payload does not match the topic's
+                model.
+
+        Emits:
+            ``message_appended`` with kwargs ``topic`` and ``payload``
+            (the canonical dict, not the model instance).
+        """
         model = self._validate(payload)
         payload_dict = _model_to_payload(model)
         self._insert_payload(payload_dict)
@@ -279,16 +476,71 @@ class Topic(Generic[ModelT]):
     def iter_new(
         self, *, records: bool = False, as_dict: bool = False
     ) -> Iterator[ModelT | Record[ModelT] | dict[str, Any]]:
+        """Iterate the topic's ``new`` (unhandled) rows in insertion order.
+
+        Args:
+            records: If ``True``, yield ``Record`` instances with storage
+                metadata. Defaults to ``False`` (yield decoded models).
+            as_dict: If ``True``, yield raw payload dicts and skip Pydantic
+                validation. Useful for ``to_polars``. Defaults to ``False``.
+
+        Yields:
+            Decoded ``ModelT`` instances, ``Record[ModelT]`` wrappers, or
+            plain ``dict`` payloads depending on the flags above.
+
+        Raises:
+            ValueError: ``records`` and ``as_dict`` are both ``True``.
+
+        Examples:
+            ```python
+            for video in topic.iter_new():
+                print(video.title)
+
+            for record in topic.iter_new(records=True):
+                print(record.id, record.created_at, record.data)
+            ```
+        """
         yield from self._iter(status="new", records=records, as_dict=as_dict)
 
     def iter_handled(
         self, *, records: bool = False, as_dict: bool = False
     ) -> Iterator[ModelT | Record[ModelT] | dict[str, Any]]:
+        """Iterate the topic's ``handled`` rows in insertion order.
+
+        Identical to ``iter_new`` but yields rows whose status has been
+        transitioned to ``handled``. Useful for auditing or replays.
+
+        Args:
+            records: If ``True``, yield ``Record`` instances.
+            as_dict: If ``True``, yield raw payload dicts.
+
+        Yields:
+            Decoded ``ModelT`` instances, ``Record[ModelT]`` wrappers, or
+            plain ``dict`` payloads.
+        """
         yield from self._iter(status="handled", records=records, as_dict=as_dict)
 
     def set_handled(
         self, _id: int | None = None, *, record: Record[Any] | None = None
     ) -> None:
+        """Mark a record as ``handled``.
+
+        Pass either the integer record id positionally or a ``Record``
+        instance via the ``record=`` keyword. The transition is idempotent:
+        calling ``set_handled`` on an already-handled row simply refreshes
+        ``handled_at``.
+
+        Args:
+            _id: Numeric primary key of the record to ack.
+            record: Alternative — a ``Record`` returned by ``iter_new`` /
+                ``iter_handled`` with ``records=True``.
+
+        Raises:
+            ValueError: Neither ``_id`` nor ``record`` was provided.
+
+        Emits:
+            ``message_handled`` with kwargs ``topic`` and ``id``.
+        """
         message_id = _id if _id is not None else record.id if record is not None else None
         if message_id is None:
             raise ValueError("set_handled requires _id or record")
@@ -304,6 +556,27 @@ class Topic(Generic[ModelT]):
         self.source._emit("message_handled", topic=self.name, id=message_id)
 
     def pipe(self, fn: Callable[[ModelT], Any]) -> Pipeline[ModelT, Any]:
+        """Start building a pipeline that transforms this topic.
+
+        Returns a ``Pipeline`` with ``self`` as the source and ``fn`` as
+        the transformation. Chain ``.to(target)`` to designate a target
+        topic, then call ``.run()`` to execute. Without ``.to(...)`` the
+        pipeline simply collects the return values of ``fn``.
+
+        Args:
+            fn: Callable that takes a model instance of this topic's type
+                and returns either a model instance for the target topic,
+                a ``dict`` that validates against the target's model, or
+                ``None`` (which acks the source record without writing).
+
+        Returns:
+            A ``Pipeline[ModelT, Any]`` ready for ``.to(target)``.
+
+        Examples:
+            ```python
+            raw.pipe(clean).to(clean_topic).run()
+            ```
+        """
         return Pipeline(self, fn)
 
     def migrate(
@@ -311,6 +584,29 @@ class Topic(Generic[ModelT]):
         new_model: type[OutputT],
         migration_function: Callable[[ModelT], OutputT | dict[str, Any]],
     ) -> Topic[OutputT]:
+        """Rewrite every stored payload using a new model.
+
+        Runs ``migration_function`` on each row's decoded payload, validates
+        the result against ``new_model``, and rewrites the row in place.
+        The topic's recorded schema and schema hash are updated atomically
+        with the rows. The dedup-field tuple is preserved and must still
+        be present on ``new_model``.
+
+        Args:
+            new_model: Target Pydantic ``BaseModel`` subclass.
+            migration_function: Callable that converts an old model instance
+                into a new model instance (or a dict that validates as one).
+
+        Returns:
+            A new ``Topic[OutputT]`` bound to the same name and source.
+
+        Raises:
+            ValueError: The previous dedup fields are not present on
+                ``new_model``.
+            TypeError: ``new_model`` is not a Pydantic ``BaseModel`` subclass.
+            pydantic.ValidationError: A migrated payload does not match
+                ``new_model``.
+        """
         new_model = _validate_model_class(new_model, argument="new_model")  # type: ignore[assignment]
         rows = self.source._conn.execute(
             "SELECT * FROM messages WHERE topic = ? ORDER BY id", (self.name,)
@@ -359,7 +655,21 @@ class Topic(Generic[ModelT]):
         self.source._models[self.name] = new_model
         return Topic(self.source, self.name, new_model)
 
-    def to_polars(self):
+    def to_polars(self) -> Any:
+        """Return all rows in this topic as a Polars ``DataFrame``.
+
+        Includes both ``new`` and ``handled`` rows. Only flat (non-nested)
+        payloads are supported — nested ``dict`` / ``list`` / ``tuple``
+        values raise ``ValueError``.
+
+        Returns:
+            A ``polars.DataFrame`` with one row per record.
+
+        Raises:
+            ImportError: ``polars`` is not installed. Install with
+                ``pip install minikafka[polars]``.
+            ValueError: A payload contains a nested collection.
+        """
         rows = list(self.iter_new(as_dict=True)) + list(self.iter_handled(as_dict=True))
         for row in rows:
             for key, value in row.items():
@@ -456,18 +766,88 @@ class Topic(Generic[ModelT]):
 
 
 class Pipeline(Generic[ModelT, OutputT]):
+    """Single-source transformation pipeline between two topics.
+
+    Build with ``topic.pipe(fn)`` and optionally ``.to(target)``. When run,
+    the pipeline iterates the source topic's ``new`` rows, applies ``fn``
+    to each decoded payload, writes the result to the target (if any), and
+    marks the source row as ``handled``. Each row is processed inside a
+    single SQLite transaction.
+
+    If ``fn`` returns ``None`` for a row, the source record is still
+    acked but nothing is written to the target.
+
+    Attributes:
+        source_topic: The topic rows are read from.
+        fn: The transformation callable.
+        target_topic: The target topic, or ``None`` until ``.to(...)`` is
+            called.
+
+    Examples:
+        ```python
+        pipeline = raw.pipe(clean).to(clean_topic)
+        results = pipeline.run()
+        print(pipeline.plot())  # Mermaid graph
+        ```
+    """
+
     def __init__(self, source_topic: Topic[ModelT], fn: Callable[[ModelT], OutputT]):
         self.source_topic = source_topic
         self.fn = fn
         self.target_topic: Topic[Any] | None = None
 
     def to(self, target: Topic[OutputT] | str) -> Pipeline[ModelT, OutputT]:
+        """Designate the target topic for this pipeline.
+
+        Args:
+            target: Either a ``Topic`` instance or the string name of a
+                topic already registered on the source's ``Source``.
+
+        Returns:
+            ``self`` — so calls can be chained
+            (``topic.pipe(fn).to(target).run()``).
+
+        Raises:
+            KeyError: ``target`` is a string and no topic by that name is
+                registered on the underlying ``Source`` (call
+                ``Source.topic(name, model)`` first to register it).
+        """
         if isinstance(target, str):
             target = self.source_topic.source._registered_topic(target)
         self.target_topic = target
         return self
 
     def run(self, *, dry_run: bool = False) -> list[Any]:
+        """Execute the pipeline over every ``new`` row in the source topic.
+
+        For each row: decode the payload, call ``fn``, validate the result
+        against the target's model (if any), then within a single
+        transaction insert the result and mark the source row as
+        ``handled``. Returns the list of transformed outputs in
+        insertion order.
+
+        Args:
+            dry_run: If ``True``, run ``fn`` and validate the results but
+                do not write anything to the target topic or transition
+                source rows. Useful for previewing.
+
+        Returns:
+            The list of outputs in source-row order. If the pipeline has
+            no target, this is the raw return value of ``fn``; with a
+            target, it is the validated target-model instance (or ``None``
+            for rows where ``fn`` returned ``None``).
+
+        Raises:
+            DuplicateMessageError: An output row would violate the target
+                topic's dedup constraint.
+            pydantic.ValidationError: ``fn`` returned a value that does not
+                validate against the target topic's model.
+
+        Emits:
+            ``pipeline_start`` before processing and ``pipeline_end`` after
+            (with ``count`` and ``dry_run``). Each handled source row also
+            emits ``message_handled``.
+        """
         source = self.source_topic.source
         source._emit(
             "pipeline_start",
@@ -516,17 +896,50 @@ class Pipeline(Generic[ModelT, OutputT]):
 
     @property
     def source_name(self) -> str:
+        """Name of the source topic."""
         return self.source_topic.name
 
     @property
     def target_name(self) -> str | None:
+        """Name of the target topic, or ``None`` if no target was set."""
         return self.target_topic.name if self.target_topic is not None else None
 
     def plot(self) -> str:
+        """Return a one-edge Mermaid ``graph TD`` diagram for this pipeline.
+
+        Equivalent to wrapping ``self`` in a ``FullPipeline`` and calling
+        ``plot`` on it. Drop the returned string into a fenced
+        ` ```mermaid ` block in markdown to render the diagram.
+        """
         return FullPipeline([self]).plot()
 
 
 class FullPipeline:
+    """Multi-pipeline DAG runner with fan-out and fan-in support.
+
+    Build with ``Source.full_pipeline(p1, p2, ...)``. Pipelines that share
+    a source topic become **siblings** (fan-out): every source row is fed
+    to each sibling's ``fn``. Pipelines whose source topic is another
+    pipeline's target form a **chain** (fan-in): source topics are run in
+    topological order so that the same call processes the new rows
+    produced upstream.
+
+    Two execution strategies are available:
+
+    - ``"strict"`` (default) — sibling transforms are computed for a row,
+      then the inserts and the source-row ack happen inside one SQLite
+      transaction. Any exception aborts the whole run with no partial
+      state.
+    - ``"best_effort"`` — each sibling runs in isolation; failures are
+      collected into ``FanOutFailure`` records. The parent row is marked
+      ``handled`` only when **every** sibling succeeded. After the run
+      finishes, any failures raise ``FanOutError`` so they cannot be
+      ignored, but the successful sibling writes are preserved.
+
+    Attributes:
+        pipelines: The list of pipelines, in the order they were passed in.
+    """
+
     def __init__(self, pipelines: list[Pipeline[Any, Any]]):
         self.pipelines = pipelines
 
@@ -536,6 +949,34 @@ class FullPipeline:
         dry_run: bool = False,
         strategy: str = "strict",
     ) -> list[list[Any]]:
+        """Execute the DAG.
+
+        Args:
+            dry_run: If ``True``, run all transforms and validate their
+                outputs but do not write to any target topic or transition
+                source rows.
+            strategy: Either ``"strict"`` (transactional, abort on any
+                error) or ``"best_effort"`` (collect failures, ack parent
+                only when all siblings succeed, raise at the end).
+
+        Returns:
+            A list of result lists — one inner list per input pipeline,
+            in the same order that ``pipelines`` was constructed in.
+
+        Raises:
+            ValueError: ``strategy`` is not one of ``"strict"`` or
+                ``"best_effort"``. Also raised if the DAG contains a cycle.
+            FanOutError: One or more siblings failed during a
+                ``best_effort`` run.
+
+        Examples:
+            ```python
+            results = source.full_pipeline(
+                raw.pipe(clean).to(clean_topic),
+                clean_topic.pipe(score).to(feed),
+            ).run(strategy="best_effort")
+            ```
+        """
         if strategy not in ("strict", "best_effort"):
             raise ValueError(
                 f"strategy must be 'strict' or 'best_effort', got {strategy!r}"
@@ -562,6 +1003,15 @@ class FullPipeline:
         return [results[id(p)] for p in self.pipelines]
 
     def plot(self) -> str:
+        """Return a Mermaid ``graph TD`` representation of the DAG.
+
+        Each pipeline contributes one edge ``source --> target``;
+        pipelines without a target produce a bare node. Embed the
+        returned string in a fenced ` ```mermaid ` block to render.
+
+        Returns:
+            The Mermaid graph as a single string.
+        """
         lines = ["graph TD"]
         for pipeline in self.pipelines:
             if pipeline.target_name is None:

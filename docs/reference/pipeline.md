@@ -1,0 +1,3 @@
+# Pipeline
+
+::: minikafka.Pipeline
