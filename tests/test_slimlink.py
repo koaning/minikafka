@@ -265,6 +265,47 @@ def test_to_polars_for_flat_payloads():
     assert frame["creator"].to_list() == ["a"]
 
 
+def test_on_event_callback_fires_for_pipeline_run():
+    events: list[tuple[str, dict]] = []
+
+    def listener(event, **kwargs):
+        events.append((event, kwargs))
+
+    src = Source(":memory:", on_event=listener)
+    videos = src.topic("videos", Video)
+    creators = src.topic("creators", Creator)
+    videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
+
+    videos.pipe(lambda v: Creator(name=v.creator)).to(creators).run()
+
+    names = [name for name, _ in events]
+    assert names.count("topic_created") == 2
+    assert ("message_appended", {"topic": "videos", "payload": {"creator": "a", "url": "u", "video_length_seconds": 10}}) in events
+
+    pipeline_starts = [kw for name, kw in events if name == "pipeline_start"]
+    assert pipeline_starts == [{"source": "videos", "target": "creators"}]
+
+    pipeline_ends = [kw for name, kw in events if name == "pipeline_end"]
+    assert pipeline_ends == [{"source": "videos", "target": "creators", "count": 1, "dry_run": False}]
+
+    handled = [kw for name, kw in events if name == "message_handled"]
+    assert handled == [{"topic": "videos", "id": 1}]
+
+    appended_topics = [kw["topic"] for name, kw in events if name == "message_appended"]
+    assert appended_topics == ["videos", "creators"]
+
+
+def test_on_event_callback_errors_are_swallowed():
+    def bad(event, **kwargs):
+        raise RuntimeError("boom")
+
+    src = Source(":memory:", on_event=bad)
+    videos = src.topic("videos", Video)
+    videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
+
+    assert list(videos.iter_new()) == [Video(creator="a", url="u", video_length_seconds=10)]
+
+
 def test_full_pipeline_sorts_and_plots():
     src = Source(":memory:")
     videos = src.topic("videos", Video, dedup=None)
