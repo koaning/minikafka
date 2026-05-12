@@ -2,11 +2,11 @@
 
 **minikafka** is a tiny typed queue backed by SQLite, built for the kind
 of single-machine homelab where a dozen little pipelines slowly accumulate
-over the years.
+over time.
 
 ## Why this exists
 
-If you run things at home you've probably been here: a cron pulls some
+You've probably been here: a cron pulls some
 RSS feeds, another script summarizes them with a local LLM, a third
 shoves the result into your reader. Each piece works in isolation. The
 hard part isn't the work — it's the **state** holding them together.
