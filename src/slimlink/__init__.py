@@ -1,5 +1,7 @@
 from .core import (
     DuplicateMessageError,
+    FanOutError,
+    FanOutFailure,
     FullPipeline,
     Pipeline,
     Record,
@@ -11,6 +13,8 @@ from .core import (
 
 __all__ = [
     "DuplicateMessageError",
+    "FanOutError",
+    "FanOutFailure",
     "FullPipeline",
     "Pipeline",
     "Record",

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ValidationError
 
 from slimlink import (
     DuplicateMessageError,
+    FanOutError,
     Record,
     SchemaMismatchError,
     Source,
@@ -51,7 +52,11 @@ def test_topic_requires_python_model_class():
     src = Source(":memory:")
 
     with pytest.raises(TypeError, match="BaseModel class"):
-        src.topic("videos", Video(creator="a", url="u", video_length_seconds=1))
+        src.topic(
+            "videos",
+            Video(creator="a", url="u", video_length_seconds=1),
+            dedup=None,
+        )
 
 
 def test_topic_requires_model_argument():
@@ -61,22 +66,29 @@ def test_topic_requires_model_argument():
         src.topic("videos")
 
 
+def test_topic_requires_explicit_dedup():
+    src = Source(":memory:")
+
+    with pytest.raises(TypeError, match="dedup"):
+        src.topic("videos", Video)
+
+
 def test_reopened_topic_requires_matching_model_class(tmp_path: Path):
     db = tmp_path / "queue.sqlite"
-    Source(db).topic("videos", Video)
+    Source(db).topic("videos", Video, dedup=None)
 
     reopened = Source(db)
-    assert reopened.topic("videos", Video).name == "videos"
+    assert reopened.topic("videos", Video, dedup=None).name == "videos"
 
 
 def test_reopened_topic_rejects_incompatible_model_class_early(tmp_path: Path):
     db = tmp_path / "queue.sqlite"
-    Source(db).topic("videos", Video)
+    Source(db).topic("videos", Video, dedup=None)
 
     reopened = Source(db)
 
     with pytest.raises(SchemaMismatchError, match="different schema"):
-        reopened.topic("videos", ShortVideo)
+        reopened.topic("videos", ShortVideo, dedup=None)
 
 
 def test_reopened_topic_rejects_dedup_mismatch_early(tmp_path: Path):
@@ -115,7 +127,7 @@ def test_append_validation_and_dedup():
 
 def test_iteration_shapes_and_handled_filtering():
     src = Source(":memory:")
-    topic = src.topic("videos", Video)
+    topic = src.topic("videos", Video, dedup=None)
     topic.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     assert list(topic.iter_new())[0] == Video(creator="a", url="u", video_length_seconds=10)
@@ -133,7 +145,7 @@ def test_iteration_shapes_and_handled_filtering():
 
 def test_pipeline_without_target_returns_results_without_mutation():
     src = Source(":memory:")
-    topic = src.topic("videos", Video)
+    topic = src.topic("videos", Video, dedup=None)
     topic.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     result = topic.pipe(lambda video: video.video_length_seconds + 1).run()
@@ -144,7 +156,7 @@ def test_pipeline_without_target_returns_results_without_mutation():
 
 def test_pipeline_to_target_appends_and_marks_source_handled():
     src = Source(":memory:")
-    videos = src.topic("videos", Video)
+    videos = src.topic("videos", Video, dedup=None)
     creators = src.topic("creators", Creator, dedup=("name",))
     videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
@@ -157,19 +169,21 @@ def test_pipeline_to_target_appends_and_marks_source_handled():
 
 def test_pipeline_to_registered_target_name():
     src = Source(":memory:")
-    videos = src.topic("videos", Video)
-    src.topic("creators", Creator)
+    videos = src.topic("videos", Video, dedup=None)
+    src.topic("creators", Creator, dedup=None)
     videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     videos.pipe(lambda video: Creator(name=video.creator)).to("creators").run()
 
-    assert list(src.topic("creators", Creator).iter_new()) == [Creator(name="a")]
+    assert list(src.topic("creators", Creator, dedup=None).iter_new()) == [
+        Creator(name="a")
+    ]
 
 
 def test_pipeline_failure_leaves_source_new():
     src = Source(":memory:")
-    videos = src.topic("videos", Video)
-    creators = src.topic("creators", Creator)
+    videos = src.topic("videos", Video, dedup=None)
+    creators = src.topic("creators", Creator, dedup=None)
     videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     with pytest.raises(ValidationError):
@@ -181,8 +195,8 @@ def test_pipeline_failure_leaves_source_new():
 
 def test_dry_run_validates_without_writes_or_handled_flags():
     src = Source(":memory:")
-    videos = src.topic("videos", Video)
-    creators = src.topic("creators", Creator)
+    videos = src.topic("videos", Video, dedup=None)
+    creators = src.topic("creators", Creator, dedup=None)
     videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     result = videos.pipe(lambda video: Creator(name=video.creator)).to(creators).run(dry_run=True)
@@ -211,7 +225,7 @@ def test_migration_commits_only_after_all_rows_validate():
 
 def test_failed_migration_leaves_payloads_unchanged():
     src = Source(":memory:")
-    videos = src.topic("videos", Video)
+    videos = src.topic("videos", Video, dedup=None)
     videos.append({"creator": "a", "url": "u1", "video_length_seconds": 10})
 
     with pytest.raises(ValidationError):
@@ -223,17 +237,17 @@ def test_failed_migration_leaves_payloads_unchanged():
 def test_file_backed_sqlite(tmp_path: Path):
     db = tmp_path / "queue.sqlite"
     src = Source(db)
-    src.topic("videos", Video).append(
+    src.topic("videos", Video, dedup=None).append(
         {"creator": "a", "url": "u", "video_length_seconds": 10}
     )
 
     reopened = Source(db)
-    assert list(reopened.topic("videos", Video).iter_new())[0].creator == "a"
+    assert list(reopened.topic("videos", Video, dedup=None).iter_new())[0].creator == "a"
 
 
 def test_to_polars_rejects_nested_payloads():
     src = Source(":memory:")
-    topic = src.topic("videos", NestedVideo)
+    topic = src.topic("videos", NestedVideo, dedup=None)
     topic.append({"creator": "a", "tags": ["x"]})
 
     with pytest.raises(ValueError, match="flat payloads"):
@@ -242,7 +256,7 @@ def test_to_polars_rejects_nested_payloads():
 
 def test_to_polars_for_flat_payloads():
     src = Source(":memory:")
-    topic = src.topic("videos", Video)
+    topic = src.topic("videos", Video, dedup=None)
     topic.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     frame = topic.to_polars()
@@ -253,9 +267,9 @@ def test_to_polars_for_flat_payloads():
 
 def test_full_pipeline_sorts_and_plots():
     src = Source(":memory:")
-    videos = src.topic("videos", Video)
-    short = src.topic("short", ShortVideo)
-    creators = src.topic("creators", Creator)
+    videos = src.topic("videos", Video, dedup=None)
+    short = src.topic("short", ShortVideo, dedup=None)
+    creators = src.topic("creators", Creator, dedup=None)
     videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     p1 = videos.pipe(lambda video: ShortVideo(creator=video.creator, url=video.url)).to(short)
@@ -268,3 +282,131 @@ def test_full_pipeline_sorts_and_plots():
     assert src.full_pipeline(p1, p2).plot() == (
         "graph TD\n    videos --> short\n    short --> creators"
     )
+
+
+def _seed_orders(src: Source):
+    orders = src.topic("orders", Video, dedup=("creator", "url"))
+    orders.append({"creator": "a", "url": "u1", "video_length_seconds": 10})
+    orders.append({"creator": "b", "url": "u2", "video_length_seconds": 20})
+    orders.append({"creator": "c", "url": "u3", "video_length_seconds": 30})
+    return orders
+
+
+def test_full_pipeline_strict_fan_out_writes_to_every_sibling():
+    src = Source(":memory:")
+    orders = _seed_orders(src)
+    short = src.topic("short", ShortVideo, dedup=("creator", "url"))
+    creators = src.topic("creators", Creator, dedup=("name",))
+
+    src.full_pipeline(
+        orders.pipe(
+            lambda v: ShortVideo(creator=v.creator, url=v.url)
+        ).to(short),
+        orders.pipe(lambda v: Creator(name=v.creator)).to(creators),
+    ).run()
+
+    assert len(list(orders.iter_new())) == 0
+    assert len(list(orders.iter_handled())) == 3
+    assert len(list(short.iter_new())) == 3
+    assert len(list(creators.iter_new())) == 3
+
+
+def test_full_pipeline_strict_failure_leaves_failing_row_new():
+    src = Source(":memory:")
+    orders = _seed_orders(src)
+    short = src.topic("short", ShortVideo, dedup=("creator", "url"))
+    creators = src.topic("creators", Creator, dedup=("name",))
+
+    def to_creator(video):
+        if video.creator == "b":
+            raise RuntimeError("boom")
+        return Creator(name=video.creator)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        src.full_pipeline(
+            orders.pipe(
+                lambda v: ShortVideo(creator=v.creator, url=v.url)
+            ).to(short),
+            orders.pipe(to_creator).to(creators),
+        ).run()
+
+    handled_orders = {r.creator for r in orders.iter_handled()}
+    new_orders = {r.creator for r in orders.iter_new()}
+    assert handled_orders == {"a"}
+    assert new_orders == {"b", "c"}
+    assert {r.creator for r in short.iter_new()} == {"a"}
+    assert {r.name for r in creators.iter_new()} == {"a"}
+
+
+def test_full_pipeline_best_effort_keeps_surviving_sibling_writes():
+    src = Source(":memory:")
+    orders = _seed_orders(src)
+    short = src.topic("short", ShortVideo, dedup=("creator", "url"))
+    creators = src.topic("creators", Creator, dedup=("name",))
+
+    def buggy(video):
+        if video.creator == "b":
+            raise RuntimeError("boom")
+        return Creator(name=video.creator)
+
+    with pytest.raises(FanOutError) as exc_info:
+        src.full_pipeline(
+            orders.pipe(
+                lambda v: ShortVideo(creator=v.creator, url=v.url)
+            ).to(short),
+            orders.pipe(buggy).to(creators),
+        ).run(strategy="best_effort")
+
+    assert len(exc_info.value.failures) == 1
+    failure = exc_info.value.failures[0]
+    assert failure.source == "orders"
+    assert failure.target == "creators"
+    assert isinstance(failure.exception, RuntimeError)
+
+    assert {r.creator for r in orders.iter_handled()} == {"a", "c"}
+    assert {r.creator for r in orders.iter_new()} == {"b"}
+    assert {r.creator for r in short.iter_new()} == {"a", "b", "c"}
+    assert {r.name for r in creators.iter_new()} == {"a", "c"}
+
+
+def test_full_pipeline_best_effort_idempotent_retry_via_dedup():
+    src = Source(":memory:")
+    orders = _seed_orders(src)
+    short = src.topic("short", ShortVideo, dedup=("creator", "url"))
+    creators = src.topic("creators", Creator, dedup=("name",))
+
+    fail_for = {"b"}
+
+    def to_creator(video):
+        if video.creator in fail_for:
+            raise RuntimeError("boom")
+        return Creator(name=video.creator)
+
+    full = src.full_pipeline(
+        orders.pipe(
+            lambda v: ShortVideo(creator=v.creator, url=v.url)
+        ).to(short),
+        orders.pipe(to_creator).to(creators),
+    )
+
+    with pytest.raises(FanOutError):
+        full.run(strategy="best_effort")
+
+    fail_for.clear()
+    full.run(strategy="best_effort")
+
+    assert {r.creator for r in orders.iter_handled()} == {"a", "b", "c"}
+    assert list(orders.iter_new()) == []
+    assert len(list(short.iter_new())) == 3
+    assert {r.name for r in creators.iter_new()} == {"a", "b", "c"}
+
+
+def test_full_pipeline_rejects_unknown_strategy():
+    src = Source(":memory:")
+    orders = _seed_orders(src)
+    creators = src.topic("creators", Creator, dedup=("name",))
+
+    with pytest.raises(ValueError, match="strategy"):
+        src.full_pipeline(
+            orders.pipe(lambda v: Creator(name=v.creator)).to(creators)
+        ).run(strategy="yolo")
