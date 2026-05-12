@@ -36,4 +36,4 @@ target-version = "py310"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
-"notebooks/demo.py" = ["B018"]
+"notebooks/*.py" = ["B018"]

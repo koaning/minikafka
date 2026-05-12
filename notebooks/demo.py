@@ -163,7 +163,7 @@ def _(Creator, creators, dry_run_state, videos):
 
 @app.cell
 def _(Creator, VideoSummary, creators, src, videos):
-    summaries = src.topic("summaries", VideoSummary)
+    summaries = src.topic("summaries", VideoSummary, dedup=None)
     graph = src.full_pipeline(
         videos.pipe(lambda video: VideoSummary(creator=video.creator, url=video.url)).to(
             summaries

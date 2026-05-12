@@ -30,6 +30,42 @@ class DuplicateMessageError(SlimlinkError):
 
 
 @dataclass(frozen=True)
+class FanOutFailure:
+    record_id: int
+    source: str
+    target: str | None
+    exception: BaseException
+
+
+class FanOutError(SlimlinkError):
+    """Raised at the end of a best_effort FullPipeline run if any sibling raised.
+
+    Successful sibling writes are preserved. Parent rows are marked
+    `handled` only when every sibling succeeded; rows with any failure
+    stay `new` so a corrected run can retry them.
+    """
+
+    def __init__(self, failures: list[FanOutFailure]):
+        self.failures: list[FanOutFailure] = list(failures)
+        super().__init__(self._format())
+
+    def _format(self) -> str:
+        head = f"{len(self.failures)} sibling failure(s) during best_effort run"
+        lines = [head]
+        for failure in self.failures:
+            arrow = (
+                f"{failure.source} -> {failure.target}"
+                if failure.target is not None
+                else failure.source
+            )
+            lines.append(
+                f"  record={failure.record_id} {arrow}: "
+                f"{type(failure.exception).__name__}: {failure.exception}"
+            )
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
 class Record(Generic[ModelT]):
     id: int
     topic: str
@@ -73,7 +109,11 @@ def _validate_model_class(model: Any, *, argument: str = "model") -> type[BaseMo
     return model
 
 
-def _validate_dedup_fields(model: type[BaseModel], dedup: Sequence[str]) -> tuple[str, ...]:
+def _validate_dedup_fields(
+    model: type[BaseModel], dedup: Sequence[str] | None
+) -> tuple[str, ...]:
+    if dedup is None:
+        return ()
     if len(set(dedup)) != len(tuple(dedup)):
         raise ValueError("dedup fields must be unique")
     fields = set(model.model_fields)
@@ -96,7 +136,11 @@ class Source:
         self._init_db()
 
     def topic(
-        self, name: str, model: type[ModelT], *, dedup: Sequence[str] = ()
+        self,
+        name: str,
+        model: type[ModelT],
+        *,
+        dedup: Sequence[str] | None,
     ) -> Topic[ModelT]:
         model = _validate_model_class(model)  # type: ignore[assignment]
         dedup_fields = _validate_dedup_fields(model, dedup)
@@ -433,11 +477,36 @@ class FullPipeline:
     def __init__(self, pipelines: list[Pipeline[Any, Any]]):
         self.pipelines = pipelines
 
-    def run(self, *, dry_run: bool = False) -> list[Any]:
-        results: list[Any] = []
-        for pipeline in self._sorted():
-            results.append(pipeline.run(dry_run=dry_run))
-        return results
+    def run(
+        self,
+        *,
+        dry_run: bool = False,
+        strategy: str = "strict",
+    ) -> list[list[Any]]:
+        if strategy not in ("strict", "best_effort"):
+            raise ValueError(
+                f"strategy must be 'strict' or 'best_effort', got {strategy!r}"
+            )
+
+        results: dict[int, list[Any]] = {id(p): [] for p in self.pipelines}
+        failures: list[FanOutFailure] = []
+
+        for source_topic, siblings in self._grouped_in_order():
+            for record in list(source_topic.iter_new(records=True)):
+                assert isinstance(record, Record)
+                if strategy == "strict":
+                    self._run_row_strict(
+                        source_topic, siblings, record, dry_run, results
+                    )
+                else:
+                    self._run_row_best_effort(
+                        source_topic, siblings, record, dry_run, results, failures
+                    )
+
+        if failures:
+            raise FanOutError(failures)
+
+        return [results[id(p)] for p in self.pipelines]
 
     def plot(self) -> str:
         lines = ["graph TD"]
@@ -448,47 +517,135 @@ class FullPipeline:
                 lines.append(f"    {pipeline.source_name} --> {pipeline.target_name}")
         return "\n".join(lines)
 
-    def _sorted(self) -> list[Pipeline[Any, Any]]:
-        edges = [
-            (pipeline.source_name, pipeline.target_name, pipeline)
-            for pipeline in self.pipelines
-            if pipeline.target_name is not None
-        ]
-        no_target = [pipeline for pipeline in self.pipelines if pipeline.target_name is None]
-        nodes = {source for source, _, _ in edges} | {
-            target for _, target, _ in edges if target is not None
-        }
+    def _grouped_in_order(
+        self,
+    ) -> list[tuple[Topic[Any], list[Pipeline[Any, Any]]]]:
+        nodes: set[str] = {p.source_name for p in self.pipelines}
         outgoing: dict[str, list[str]] = defaultdict(list)
-        indegree = {node: 0 for node in nodes}
-        by_edge: dict[tuple[str, str], list[Pipeline[Any, Any]]] = defaultdict(list)
+        indegree: dict[str, int] = {}
+        for p in self.pipelines:
+            if p.target_name is not None:
+                nodes.add(p.target_name)
+                outgoing[p.source_name].append(p.target_name)
+        for node in nodes:
+            indegree[node] = 0
+        for p in self.pipelines:
+            if p.target_name is not None:
+                indegree[p.target_name] += 1
 
-        for source, target, pipeline in edges:
-            assert target is not None
-            outgoing[source].append(target)
-            indegree[target] += 1
-            by_edge[(source, target)].append(pipeline)
-
-        queue = deque([node for node, degree in indegree.items() if degree == 0])
-        ordered_nodes: list[str] = []
+        queue = deque(sorted(node for node, deg in indegree.items() if deg == 0))
+        ordered_sources: list[str] = []
         while queue:
             node = queue.popleft()
-            ordered_nodes.append(node)
+            ordered_sources.append(node)
             for target in outgoing[node]:
                 indegree[target] -= 1
                 if indegree[target] == 0:
                     queue.append(target)
 
-        if len(ordered_nodes) != len(nodes):
+        if len(ordered_sources) != len(nodes):
             raise ValueError("pipeline contains a cycle")
 
-        ordered: list[Pipeline[Any, Any]] = []
-        seen_edges: set[tuple[str, str]] = set()
-        for source in ordered_nodes:
-            for target in outgoing[source]:
-                edge = (source, target)
-                if edge in seen_edges:
+        by_source: dict[str, list[Pipeline[Any, Any]]] = defaultdict(list)
+        for p in self.pipelines:
+            by_source[p.source_name].append(p)
+
+        groups: list[tuple[Topic[Any], list[Pipeline[Any, Any]]]] = []
+        emitted: set[str] = set()
+        for source_name in ordered_sources:
+            if source_name in by_source and source_name not in emitted:
+                pipelines = by_source[source_name]
+                groups.append((pipelines[0].source_topic, pipelines))
+                emitted.add(source_name)
+        return groups
+
+    def _run_row_strict(
+        self,
+        source: Topic[Any],
+        siblings: list[Pipeline[Any, Any]],
+        record: Record[Any],
+        dry_run: bool,
+        results: dict[int, list[Any]],
+    ) -> None:
+        transforms: list[tuple[Pipeline[Any, Any], Any]] = []
+        for p in siblings:
+            result = p.fn(record.data)
+            if p.target_topic is None or result is None:
+                transforms.append((p, result))
+                continue
+            target_model = p.target_topic._validate(result)
+            transforms.append((p, target_model))
+
+        any_target = any(p.target_topic is not None for p in siblings)
+        if not dry_run and any_target:
+            with source.source._conn:
+                for p, model in transforms:
+                    if p.target_topic is not None and model is not None:
+                        payload = _model_to_payload(model)
+                        p.target_topic._insert_payload_in_current_transaction(payload)
+                source.source._conn.execute(
+                    """
+                    UPDATE messages
+                    SET handled_at = ?, status = 'handled'
+                    WHERE id = ? AND topic = ?
+                    """,
+                    (_utc_now(), record.id, source.name),
+                )
+
+        for p, model in transforms:
+            results[id(p)].append(model)
+
+    def _run_row_best_effort(
+        self,
+        source: Topic[Any],
+        siblings: list[Pipeline[Any, Any]],
+        record: Record[Any],
+        dry_run: bool,
+        results: dict[int, list[Any]],
+        failures: list[FanOutFailure],
+    ) -> None:
+        siblings_done = 0
+        for p in siblings:
+            try:
+                result = p.fn(record.data)
+                if p.target_topic is None:
+                    results[id(p)].append(result)
+                    siblings_done += 1
                     continue
-                ordered.extend(by_edge[edge])
-                seen_edges.add(edge)
-        ordered.extend(no_target)
-        return ordered
+                if result is None:
+                    results[id(p)].append(None)
+                    siblings_done += 1
+                    continue
+                target_model = p.target_topic._validate(result)
+                if not dry_run:
+                    payload = _model_to_payload(target_model)
+                    try:
+                        with source.source._conn:
+                            p.target_topic._insert_payload_in_current_transaction(
+                                payload
+                            )
+                    except DuplicateMessageError:
+                        pass
+                results[id(p)].append(target_model)
+                siblings_done += 1
+            except Exception as exc:
+                failures.append(
+                    FanOutFailure(
+                        record_id=record.id,
+                        source=source.name,
+                        target=p.target_name,
+                        exception=exc,
+                    )
+                )
+
+        any_target = any(p.target_topic is not None for p in siblings)
+        if siblings_done == len(siblings) and any_target and not dry_run:
+            with source.source._conn:
+                source.source._conn.execute(
+                    """
+                    UPDATE messages
+                    SET handled_at = ?, status = 'handled'
+                    WHERE id = ? AND topic = ?
+                    """,
+                    (_utc_now(), record.id, source.name),
+                )
