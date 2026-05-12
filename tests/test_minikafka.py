@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from slimlink import (
+from minikafka import (
     DuplicateMessageError,
     FanOutError,
     Record,
@@ -272,21 +272,29 @@ def test_on_event_callback_fires_for_pipeline_run():
         events.append((event, kwargs))
 
     src = Source(":memory:", on_event=listener)
-    videos = src.topic("videos", Video)
-    creators = src.topic("creators", Creator)
+    videos = src.topic("videos", Video, dedup=None)
+    creators = src.topic("creators", Creator, dedup=None)
     videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     videos.pipe(lambda v: Creator(name=v.creator)).to(creators).run()
 
     names = [name for name, _ in events]
     assert names.count("topic_created") == 2
-    assert ("message_appended", {"topic": "videos", "payload": {"creator": "a", "url": "u", "video_length_seconds": 10}}) in events
+    assert (
+        "message_appended",
+        {
+            "topic": "videos",
+            "payload": {"creator": "a", "url": "u", "video_length_seconds": 10},
+        },
+    ) in events
 
     pipeline_starts = [kw for name, kw in events if name == "pipeline_start"]
     assert pipeline_starts == [{"source": "videos", "target": "creators"}]
 
     pipeline_ends = [kw for name, kw in events if name == "pipeline_end"]
-    assert pipeline_ends == [{"source": "videos", "target": "creators", "count": 1, "dry_run": False}]
+    assert pipeline_ends == [
+        {"source": "videos", "target": "creators", "count": 1, "dry_run": False}
+    ]
 
     handled = [kw for name, kw in events if name == "message_handled"]
     assert handled == [{"topic": "videos", "id": 1}]
@@ -300,7 +308,7 @@ def test_on_event_callback_errors_are_swallowed():
         raise RuntimeError("boom")
 
     src = Source(":memory:", on_event=bad)
-    videos = src.topic("videos", Video)
+    videos = src.topic("videos", Video, dedup=None)
     videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
 
     assert list(videos.iter_new()) == [Video(creator="a", url="u", video_length_seconds=10)]

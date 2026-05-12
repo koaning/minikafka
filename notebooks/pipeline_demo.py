@@ -14,7 +14,7 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # slimlink DAG fan-out
+    # minikafka DAG fan-out
 
     `FullPipeline.run()` now supports fan-out: when several pipelines share
     a parent topic, every parent row is offered to every sibling. The
@@ -44,7 +44,7 @@ def _(mo):
 def _():
     from pydantic import BaseModel
 
-    from slimlink import FanOutError, Source
+    from minikafka import FanOutError, Source
 
     class Order(BaseModel):
         order_id: str

@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from slimlink import Source
+from minikafka import Source
 
 
 class RawYouTube(BaseModel):
@@ -161,7 +161,10 @@ def main() -> None:
             author="Simon Willison",
             title="Notes on running local LLMs",
             url="https://simonw/local-llms",
-            html_body="<p>I have been running <b>local</b> LLMs all week and the results are surprisingly usable.</p>",
+            html_body=(
+                "<p>I have been running <b>local</b> LLMs all week "
+                "and the results are surprisingly usable.</p>"
+            ),
         )
     )
     raw_blog.append(

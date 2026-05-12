@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "slimlink"
+name = "minikafka"
 version = "0.1.0"
 description = "A tiny typed SQLite-backed queue for Python."
 readme = "README.md"
