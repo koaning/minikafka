@@ -128,12 +128,41 @@ def _model_to_payload(model: BaseModel) -> dict[str, Any]:
 
 
 class Source:
-    def __init__(self, path: str | Path):
+    """SQLite-backed queue source.
+
+    Pass ``on_event`` to observe activity. The callable is invoked as
+    ``on_event(event_name, **kwargs)`` for these events:
+
+    - ``topic_created`` — kwargs: ``name``, ``model``, ``dedup``
+    - ``message_appended`` — kwargs: ``topic``, ``payload``
+    - ``message_handled`` — kwargs: ``topic``, ``id``
+    - ``pipeline_start`` — kwargs: ``source``, ``target``
+    - ``pipeline_end`` — kwargs: ``source``, ``target``, ``count``, ``dry_run``
+
+    Exceptions raised inside ``on_event`` are swallowed so logging cannot
+    break the pipeline.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        on_event: Callable[..., None] | None = None,
+    ):
         self.path = str(path)
+        self._on_event = on_event
         self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
         self._models: dict[str, type[BaseModel]] = {}
         self._init_db()
+
+    def _emit(self, event: str, **kwargs: Any) -> None:
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(event, **kwargs)
+        except Exception:
+            pass
 
     def topic(
         self,
@@ -164,6 +193,12 @@ class Source:
                 ),
             )
             self._conn.commit()
+            self._emit(
+                "topic_created",
+                name=name,
+                model=model.__name__,
+                dedup=dedup_fields,
+            )
         else:
             existing_dedup = tuple(json.loads(existing["dedup_fields"]))
             if existing["schema_hash"] != schema_hash or existing_dedup != dedup_fields:
@@ -266,6 +301,7 @@ class Topic(Generic[ModelT]):
             (_utc_now(), message_id, self.name),
         )
         self.source._conn.commit()
+        self.source._emit("message_handled", topic=self.name, id=message_id)
 
     def pipe(self, fn: Callable[[ModelT], Any]) -> Pipeline[ModelT, Any]:
         return Pipeline(self, fn)
@@ -409,6 +445,7 @@ class Topic(Generic[ModelT]):
                     f"duplicate message for topic {self.name!r} and dedup fields {dedup_fields}"
                 ) from exc
             raise
+        self.source._emit("message_appended", topic=self.name, payload=payload_dict)
 
     def _dedup_hash_for_payload(
         self, payload_dict: dict[str, Any], dedup_fields: Sequence[str]
@@ -431,6 +468,12 @@ class Pipeline(Generic[ModelT, OutputT]):
         return self
 
     def run(self, *, dry_run: bool = False) -> list[Any]:
+        source = self.source_topic.source
+        source._emit(
+            "pipeline_start",
+            source=self.source_topic.name,
+            target=self.target_name,
+        )
         rows = list(self.source_topic.iter_new(records=True))
         results: list[Any] = []
         for record in rows:
@@ -449,9 +492,9 @@ class Pipeline(Generic[ModelT, OutputT]):
             if dry_run:
                 continue
             target_payload = _model_to_payload(target_model)
-            with self.source_topic.source._conn:
+            with source._conn:
                 self.target_topic._insert_payload_in_current_transaction(target_payload)
-                self.source_topic.source._conn.execute(
+                source._conn.execute(
                     """
                     UPDATE messages
                     SET handled_at = ?, status = 'handled'
@@ -459,6 +502,16 @@ class Pipeline(Generic[ModelT, OutputT]):
                     """,
                     (_utc_now(), record.id, self.source_topic.name),
                 )
+            source._emit(
+                "message_handled", topic=self.source_topic.name, id=record.id
+            )
+        source._emit(
+            "pipeline_end",
+            source=self.source_topic.name,
+            target=self.target_name,
+            count=len(results),
+            dry_run=dry_run,
+        )
         return results
 
     @property
