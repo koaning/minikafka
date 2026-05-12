@@ -3,10 +3,10 @@ from .core import (
     FanOutError,
     FanOutFailure,
     FullPipeline,
+    MinikafkaError,
     Pipeline,
     Record,
     SchemaMismatchError,
-    SlimlinkError,
     Source,
     Topic,
 )
@@ -16,10 +16,10 @@ __all__ = [
     "FanOutError",
     "FanOutFailure",
     "FullPipeline",
+    "MinikafkaError",
     "Pipeline",
     "Record",
     "SchemaMismatchError",
-    "SlimlinkError",
     "Source",
     "Topic",
 ]

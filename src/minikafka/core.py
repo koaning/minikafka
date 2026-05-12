@@ -17,15 +17,15 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
-class SlimlinkError(Exception):
-    """Base class for slimlink errors."""
+class MinikafkaError(Exception):
+    """Base class for minikafka errors."""
 
 
-class SchemaMismatchError(SlimlinkError):
+class SchemaMismatchError(MinikafkaError):
     """Raised when a topic exists with incompatible schema or configuration."""
 
 
-class DuplicateMessageError(SlimlinkError):
+class DuplicateMessageError(MinikafkaError):
     """Raised when a message violates a topic's deduplication constraint."""
 
 
@@ -37,7 +37,7 @@ class FanOutFailure:
     exception: BaseException
 
 
-class FanOutError(SlimlinkError):
+class FanOutError(MinikafkaError):
     """Raised at the end of a best_effort FullPipeline run if any sibling raised.
 
     Successful sibling writes are preserved. Parent rows are marked

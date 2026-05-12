@@ -14,7 +14,7 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    # slimlink demo
+    # minikafka demo
 
     This notebook demonstrates the v1 queue API against an in-memory SQLite
     database: topic creation, validation, deduplication, record metadata,
@@ -27,7 +27,7 @@ def _(mo):
 def _():
     from pydantic import BaseModel
 
-    from slimlink import DuplicateMessageError, Source
+    from minikafka import DuplicateMessageError, Source
 
     class YouTubeVideo(BaseModel):
         creator: str

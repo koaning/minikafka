@@ -1,10 +1,10 @@
-# slimlink
+# minikafka
 
-`slimlink` is a tiny typed queue backed by SQLite.
+`minikafka` is a tiny typed queue backed by SQLite.
 
 ```python
 from pydantic import BaseModel
-from slimlink import Source
+from minikafka import Source
 
 
 class YouTubeVideo(BaseModel):

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from slimlink import (
+from minikafka import (
     DuplicateMessageError,
     FanOutError,
     Record,
