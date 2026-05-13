@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
@@ -210,9 +211,9 @@ class Source:
             url: str
             title: str
 
-        source = Source(":memory:")
-        videos = source.topic("videos", Video, dedup=("url",))
-        videos.append({"url": "https://example.com", "title": "hello"})
+        with Source(":memory:") as source:
+            videos = source.topic("videos", Video, dedup=("url",))
+            videos.append({"url": "https://example.com", "title": "hello"})
         ```
     """
 
@@ -347,6 +348,17 @@ class Source:
             ```
         """
         return FullPipeline(list(pipelines))
+
+    def __enter__(self) -> Source:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def close(self) -> None:
         """Close the underlying SQLite connection.

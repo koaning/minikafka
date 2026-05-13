@@ -81,20 +81,20 @@ def llm_summary(item: RssItem) -> Summary:
     )
 
 
-source = Source("homelab.sqlite")  # one file on disk, survives restarts
-items = source.topic("rss.items", RssItem, dedup=("url",))
-summaries = source.topic("rss.summaries", Summary, dedup=("url",))
+with Source("homelab.sqlite") as source:  # one file on disk, survives restarts
+    items = source.topic("rss.items", RssItem, dedup=("url",))
+    summaries = source.topic("rss.summaries", Summary, dedup=("url",))
 
-items.append({
-    "url": "https://example.com/post-1",
-    "title": "Hello, homelab",
-    "body": "A long post about running things at home...",
-})
+    items.append({
+        "url": "https://example.com/post-1",
+        "title": "Hello, homelab",
+        "body": "A long post about running things at home...",
+    })
 
-items.pipe(llm_summary).to(summaries).run()
+    items.pipe(llm_summary).to(summaries).run()
 
-for s in summaries.iter_new():
-    print(s.title, "->", s.llm_summary)
+    for s in summaries.iter_new():
+        print(s.title, "->", s.llm_summary)
 ```
 
 The next time this script runs, the `dedup=("url",)` constraint on

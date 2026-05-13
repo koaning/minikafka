@@ -19,15 +19,21 @@ class Video(BaseModel):
 
 ## 2. Open a source and create a topic
 
+A `Source` owns the SQLite connection. Use it as a context manager so the
+connection is closed deterministically when the block exits:
+
 ```python
 from minikafka import Source
 
-source = Source(":memory:")  # or a path to a .sqlite file
-videos = source.topic("videos", Video, dedup=("url",))
+with Source(":memory:") as source:  # or a path to a .sqlite file
+    videos = source.topic("videos", Video, dedup=("url",))
 ```
 
 The `dedup=("url",)` tuple makes the database reject duplicate URLs at insert
 time. Pass `dedup=None` to disable.
+
+The snippets in the following sections all run inside this `with` block — they
+share the `source` and `videos` bindings created here.
 
 ## 3. Append records
 
@@ -98,7 +104,8 @@ def log(event, **kwargs):
     print(event, kwargs)
 
 
-source = Source(":memory:", on_event=log)
+with Source(":memory:", on_event=log) as source:
+    ...
 ```
 
 Events emitted: `topic_created`, `message_appended`, `message_handled`,
