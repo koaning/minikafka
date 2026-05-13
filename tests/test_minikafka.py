@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -459,3 +460,33 @@ def test_full_pipeline_rejects_unknown_strategy():
         src.full_pipeline(
             orders.pipe(lambda v: Creator(name=v.creator)).to(creators)
         ).run(strategy="yolo")
+
+
+def test_source_context_manager_closes_connection(tmp_path: Path):
+    db = tmp_path / "queue.sqlite"
+    with Source(db) as src:
+        assert isinstance(src, Source)
+        videos = src.topic("videos", Video, dedup=("url",))
+        videos.append(
+            Video(creator="a", url="https://x/1", video_length_seconds=10)
+        )
+        conn = src._conn
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+
+def test_source_context_manager_closes_on_exception(tmp_path: Path):
+    db = tmp_path / "queue.sqlite"
+
+    class Boom(RuntimeError):
+        pass
+
+    with pytest.raises(Boom):
+        with Source(db) as src:
+            src.topic("videos", Video, dedup=("url",))
+            conn = src._conn
+            raise Boom
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")

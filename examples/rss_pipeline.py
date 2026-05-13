@@ -123,92 +123,91 @@ def score_filter(item: FeedItem) -> FeedItem | None:
 
 def main() -> None:
     print("== setting up topics ==")
-    src = Source(":memory:", on_event=log)
+    with Source(":memory:", on_event=log) as src:
+        raw_yt = src.topic("raw.rss.youtube", RawYouTube, dedup=("url",))
+        raw_blog = src.topic("raw.rss.blogs", RawBlog, dedup=("url",))
+        raw_hn = src.topic("raw.rss.hackernews", RawHackerNews, dedup=("url",))
 
-    raw_yt = src.topic("raw.rss.youtube", RawYouTube, dedup=("url",))
-    raw_blog = src.topic("raw.rss.blogs", RawBlog, dedup=("url",))
-    raw_hn = src.topic("raw.rss.hackernews", RawHackerNews, dedup=("url",))
+        clean_yt = src.topic("clean.rss.youtube", CleanItem, dedup=("url",))
+        clean_blog_t = src.topic("clean.rss.blogs", CleanItem, dedup=("url",))
+        clean_hn_t = src.topic("clean.rss.hackernews", CleanItem, dedup=("url",))
 
-    clean_yt = src.topic("clean.rss.youtube", CleanItem, dedup=("url",))
-    clean_blog_t = src.topic("clean.rss.blogs", CleanItem, dedup=("url",))
-    clean_hn_t = src.topic("clean.rss.hackernews", CleanItem, dedup=("url",))
+        feed = src.topic("feed", FeedItem, dedup=("url",))
+        filtered_feed = src.topic("filtered_feed", FeedItem, dedup=("url",))
 
-    feed = src.topic("feed", FeedItem, dedup=("url",))
-    filtered_feed = src.topic("filtered_feed", FeedItem, dedup=("url",))
-
-    print("\n== seeding raw topics ==")
-    raw_yt.append(
-        RawYouTube(
-            creator="3blue1brown",
-            title="  But what is a Fourier series?  ",
-            url="https://yt/3b1b-fourier",
-            length_seconds=1320,
-            raw_description="A visual intro to Fourier series.\nMore details below...",
+        print("\n== seeding raw topics ==")
+        raw_yt.append(
+            RawYouTube(
+                creator="3blue1brown",
+                title="  But what is a Fourier series?  ",
+                url="https://yt/3b1b-fourier",
+                length_seconds=1320,
+                raw_description="A visual intro to Fourier series.\nMore details below...",
+            )
         )
-    )
-    raw_yt.append(
-        RawYouTube(
-            creator="Veritasium",
-            title="The mystery of spinning ice",
-            url="https://yt/veritasium-ice",
-            length_seconds=900,
-            raw_description="short",
+        raw_yt.append(
+            RawYouTube(
+                creator="Veritasium",
+                title="The mystery of spinning ice",
+                url="https://yt/veritasium-ice",
+                length_seconds=900,
+                raw_description="short",
+            )
         )
-    )
 
-    raw_blog.append(
-        RawBlog(
-            author="Simon Willison",
-            title="Notes on running local LLMs",
-            url="https://simonw/local-llms",
-            html_body=(
-                "<p>I have been running <b>local</b> LLMs all week "
-                "and the results are surprisingly usable.</p>"
-            ),
+        raw_blog.append(
+            RawBlog(
+                author="Simon Willison",
+                title="Notes on running local LLMs",
+                url="https://simonw/local-llms",
+                html_body=(
+                    "<p>I have been running <b>local</b> LLMs all week "
+                    "and the results are surprisingly usable.</p>"
+                ),
+            )
         )
-    )
-    raw_blog.append(
-        RawBlog(
-            author="Random",
-            title="hello",
-            url="https://blog/hello",
-            html_body="<p>hi</p>",
+        raw_blog.append(
+            RawBlog(
+                author="Random",
+                title="hello",
+                url="https://blog/hello",
+                html_body="<p>hi</p>",
+            )
         )
-    )
 
-    raw_hn.append(
-        RawHackerNews(
-            user="pg",
-            title="Show HN: a tiny SQLite queue",
-            url="https://hn/sqlite-queue",
-            points=412,
-            comments=87,
+        raw_hn.append(
+            RawHackerNews(
+                user="pg",
+                title="Show HN: a tiny SQLite queue",
+                url="https://hn/sqlite-queue",
+                points=412,
+                comments=87,
+            )
         )
-    )
-    raw_hn.append(
-        RawHackerNews(
-            user="anon",
-            title="Ask HN: best chairs?",
-            url="https://hn/chairs",
-            points=12,
-            comments=3,
+        raw_hn.append(
+            RawHackerNews(
+                user="anon",
+                title="Ask HN: best chairs?",
+                url="https://hn/chairs",
+                points=12,
+                comments=3,
+            )
         )
-    )
 
-    print("\n== running the full pipeline ==")
-    src.full_pipeline(
-        raw_yt.pipe(clean_youtube).to(clean_yt),
-        raw_blog.pipe(clean_blog).to(clean_blog_t),
-        raw_hn.pipe(clean_hn).to(clean_hn_t),
-        clean_yt.pipe(youtube_to_feed).to(feed),
-        clean_blog_t.pipe(blog_to_feed).to(feed),
-        clean_hn_t.pipe(hn_to_feed).to(feed),
-        feed.pipe(score_filter).to(filtered_feed),
-    ).run()
+        print("\n== running the full pipeline ==")
+        src.full_pipeline(
+            raw_yt.pipe(clean_youtube).to(clean_yt),
+            raw_blog.pipe(clean_blog).to(clean_blog_t),
+            raw_hn.pipe(clean_hn).to(clean_hn_t),
+            clean_yt.pipe(youtube_to_feed).to(feed),
+            clean_blog_t.pipe(blog_to_feed).to(feed),
+            clean_hn_t.pipe(hn_to_feed).to(feed),
+            feed.pipe(score_filter).to(filtered_feed),
+        ).run()
 
-    print("\n== filtered_feed contents ==")
-    for item in filtered_feed.iter_new():
-        print(f"  [{item.score:3d}] {item.source:10s} {item.title}")
+        print("\n== filtered_feed contents ==")
+        for item in filtered_feed.iter_new():
+            print(f"  [{item.score:3d}] {item.source:10s} {item.title}")
 
 
 if __name__ == "__main__":
