@@ -144,6 +144,27 @@ def test_iteration_shapes_and_handled_filtering():
     assert list(topic.iter_handled())[0].creator == "a"
 
 
+def test_topic_count():
+    src = Source(":memory:")
+    topic = src.topic("videos", Video, dedup=None)
+    assert topic.count() == 0
+    assert topic.count("new") == 0
+
+    topic.append({"creator": "a", "url": "u1", "video_length_seconds": 10})
+    topic.append({"creator": "b", "url": "u2", "video_length_seconds": 20})
+
+    assert topic.count() == 2
+    assert topic.count("new") == 2
+    assert topic.count("handled") == 0
+
+    record = list(topic.iter_new(records=True))[0]
+    topic.set_handled(record=record)
+
+    assert topic.count() == 2
+    assert topic.count("new") == 1
+    assert topic.count("handled") == 1
+
+
 def test_pipeline_without_target_returns_results_without_mutation():
     src = Source(":memory:")
     topic = src.topic("videos", Video, dedup=None)
