@@ -868,6 +868,7 @@ class Pipeline(Generic[ModelT, OutputT]):
         )
         rows = list(self.source_topic.iter_new(records=True))
         results: list[Any] = []
+        writes: list[tuple[Record[Any], dict[str, Any] | None]] = []
         for record in rows:
             assert isinstance(record, Record)
             result = self.fn(record.data)
@@ -877,26 +878,31 @@ class Pipeline(Generic[ModelT, OutputT]):
             if result is None:
                 results.append(None)
                 if not dry_run:
-                    self.source_topic.set_handled(record=record)
+                    writes.append((record, None))
                 continue
             target_model = self.target_topic._validate(result)
             results.append(target_model)
             if dry_run:
                 continue
             target_payload = _model_to_payload(target_model)
+            writes.append((record, target_payload))
+        if writes:
             with source._conn:
-                self.target_topic._insert_payload_in_current_transaction(target_payload)
-                source._conn.execute(
-                    """
-                    UPDATE messages
-                    SET handled_at = ?, status = 'handled'
-                    WHERE id = ? AND topic = ?
-                    """,
-                    (_utc_now(), record.id, self.source_topic.name),
+                for record, payload in writes:
+                    if payload is not None:
+                        self.target_topic._insert_payload_in_current_transaction(payload)
+                    source._conn.execute(
+                        """
+                        UPDATE messages
+                        SET handled_at = ?, status = 'handled'
+                        WHERE id = ? AND topic = ?
+                        """,
+                        (_utc_now(), record.id, self.source_topic.name),
+                    )
+            for record, _ in writes:
+                source._emit(
+                    "message_handled", topic=self.source_topic.name, id=record.id
                 )
-            source._emit(
-                "message_handled", topic=self.source_topic.name, id=record.id
-            )
         source._emit(
             "pipeline_end",
             source=self.source_topic.name,
