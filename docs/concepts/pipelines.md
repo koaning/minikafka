@@ -53,6 +53,22 @@ graph TD
 Drop the string into a fenced ```mermaid``` block to render the diagram
 inside this documentation site.
 
+### Annotated counts
+
+Pass `counts=True` to annotate each node with its current new/handled
+record counts:
+
+```python
+print(videos.pipe(clean).to(cleaned).plot(counts=True))
+```
+
+```mermaid
+graph TD
+    videos["videos (5 new / 3 handled)"] --> cleaned["cleaned (2 new / 0 handled)"]
+```
+
+This works on both `Pipeline.plot()` and `FullPipeline.plot()`.
+
 ## Targeting topics by name
 
 If the target topic is already registered on the `Source`, you can pass

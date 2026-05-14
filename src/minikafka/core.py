@@ -961,14 +961,18 @@ class Pipeline(Generic[ModelT, OutputT]):
         """Name of the target topic, or ``None`` if no target was set."""
         return self.target_topic.name if self.target_topic is not None else None
 
-    def plot(self) -> str:
+    def plot(self, *, counts: bool = False) -> str:
         """Return a one-edge Mermaid ``graph TD`` diagram for this pipeline.
 
         Equivalent to wrapping ``self`` in a ``FullPipeline`` and calling
         ``plot`` on it. Drop the returned string into a fenced
         ` ```mermaid ` block in markdown to render the diagram.
+
+        Args:
+            counts: If ``True``, annotate each node with its new/handled
+                record counts.
         """
-        return FullPipeline([self]).plot()
+        return FullPipeline([self]).plot(counts=counts)
 
 
 class FullPipeline:
@@ -1059,22 +1063,50 @@ class FullPipeline:
 
         return [results[id(p)] for p in self.pipelines]
 
-    def plot(self) -> str:
+    def plot(self, *, counts: bool = False) -> str:
         """Return a Mermaid ``graph TD`` representation of the DAG.
 
         Each pipeline contributes one edge ``source --> target``;
         pipelines without a target produce a bare node. Embed the
         returned string in a fenced ` ```mermaid ` block to render.
 
+        Args:
+            counts: If ``True``, annotate each node with its new/handled
+                record counts, e.g.
+                ``videos["videos (5 new / 3 handled)"]``.
+
         Returns:
             The Mermaid graph as a single string.
         """
+        if counts:
+            topics: dict[str, Topic[Any]] = {}
+            for p in self.pipelines:
+                topics[p.source_name] = p.source_topic
+                if p.target_topic is not None:
+                    topics[p.target_name] = p.target_topic  # type: ignore[index]
+
+            def _node(name: str) -> str:
+                topic = topics.get(name)
+                if topic is None:
+                    return name
+                new = topic.count("new")
+                handled = topic.count("handled")
+                label = f"{name} ({new} new / {handled} handled)"
+                return f'{name}["{label}"]'
+        else:
+
+            def _node(name: str) -> str:
+                return name
+
         lines = ["graph TD"]
         for pipeline in self.pipelines:
             if pipeline.target_name is None:
-                lines.append(f"    {pipeline.source_name}")
+                lines.append(f"    {_node(pipeline.source_name)}")
             else:
-                lines.append(f"    {pipeline.source_name} --> {pipeline.target_name}")
+                lines.append(
+                    f"    {_node(pipeline.source_name)}"
+                    f" --> {_node(pipeline.target_name)}"
+                )
         return "\n".join(lines)
 
     def _grouped_in_order(

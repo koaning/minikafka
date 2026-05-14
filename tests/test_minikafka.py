@@ -355,6 +355,30 @@ def test_full_pipeline_sorts_and_plots():
     )
 
 
+def test_plot_with_counts():
+    src = Source(":memory:")
+    videos = src.topic("videos", Video, dedup=None)
+    short = src.topic("short", ShortVideo, dedup=None)
+
+    videos.append({"creator": "a", "url": "u1", "video_length_seconds": 10})
+    videos.append({"creator": "b", "url": "u2", "video_length_seconds": 20})
+
+    p = videos.pipe(lambda v: ShortVideo(creator=v.creator, url=v.url)).to(short)
+
+    diagram_before = p.plot(counts=True)
+    assert 'videos["videos (2 new / 0 handled)"]' in diagram_before
+    assert 'short["short (0 new / 0 handled)"]' in diagram_before
+
+    p.run()
+
+    diagram_after = p.plot(counts=True)
+    assert 'videos["videos (0 new / 2 handled)"]' in diagram_after
+    assert 'short["short (2 new / 0 handled)"]' in diagram_after
+
+    # Without counts flag, nodes are plain names
+    assert p.plot() == "graph TD\n    videos --> short"
+
+
 def _seed_orders(src: Source):
     orders = src.topic("orders", Video, dedup=("creator", "url"))
     orders.append({"creator": "a", "url": "u1", "video_length_seconds": 10})
