@@ -126,6 +126,34 @@ def test_append_validation_and_dedup():
         topic.append({"creator": "a", "url": "u", "video_length_seconds": 20})
 
 
+def test_extend_inserts_batch_atomically():
+    src = Source(":memory:")
+    topic = src.topic("videos", Video, dedup=("creator", "url"))
+
+    results = topic.extend([
+        {"creator": "a", "url": "u1", "video_length_seconds": 10},
+        {"creator": "b", "url": "u2", "video_length_seconds": 20},
+        Video(creator="c", url="u3", video_length_seconds=30),
+    ])
+
+    assert len(results) == 3
+    assert all(isinstance(r, Video) for r in results)
+    assert len(list(topic.iter_new())) == 3
+
+
+def test_extend_rolls_back_on_validation_error():
+    src = Source(":memory:")
+    topic = src.topic("videos", Video, dedup=None)
+
+    with pytest.raises(ValidationError):
+        topic.extend([
+            {"creator": "a", "url": "u1", "video_length_seconds": 10},
+            {"creator": "bad"},
+        ])
+
+    assert len(list(topic.iter_new())) == 0
+
+
 def test_iteration_shapes_and_handled_filtering():
     src = Source(":memory:")
     topic = src.topic("videos", Video, dedup=None)

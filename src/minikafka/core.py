@@ -18,7 +18,7 @@ import inspect
 import json
 import sqlite3
 from collections import defaultdict, deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -484,6 +484,31 @@ class Topic(Generic[ModelT]):
         payload_dict = _model_to_payload(model)
         self._insert_payload(payload_dict)
         return model
+
+    def extend(self, payloads: Iterable[ModelT | dict[str, Any]]) -> list[ModelT]:
+        """Validate and insert multiple records in a single transaction.
+
+        Each payload is validated up-front. If all pass, the rows are
+        inserted inside one SQLite transaction so the batch is atomic.
+
+        Args:
+            payloads: An iterable of Pydantic model instances or dicts.
+
+        Returns:
+            The list of validated model instances that were stored.
+
+        Raises:
+            DuplicateMessageError: A row would violate the topic's dedup
+                constraint.
+            pydantic.ValidationError: A payload does not match the topic's
+                model.
+        """
+        models = [self._validate(p) for p in payloads]
+        payload_dicts = [_model_to_payload(m) for m in models]
+        with self.source._conn:
+            for payload_dict in payload_dicts:
+                self._insert_payload_in_current_transaction(payload_dict)
+        return models
 
     def iter_new(
         self, *, records: bool = False, as_dict: bool = False
