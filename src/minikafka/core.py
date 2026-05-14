@@ -129,6 +129,7 @@ class Record(Generic[ModelT]):
     status: str
     payload_hash: str
     dedup_hash: str | None
+    parent_id: int | None
     data: ModelT
 
 
@@ -388,6 +389,7 @@ class Source:
                 schema_hash TEXT NOT NULL,
                 payload_hash TEXT NOT NULL,
                 dedup_hash TEXT,
+                parent_id INTEGER REFERENCES messages(id),
                 created_at TEXT NOT NULL,
                 handled_at TEXT,
                 status TEXT NOT NULL DEFAULT 'new',
@@ -403,6 +405,18 @@ class Source:
             """
         )
         self._conn.commit()
+        self._migrate_parent_id()
+
+    def _migrate_parent_id(self) -> None:
+        cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "parent_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN parent_id INTEGER REFERENCES messages(id)"
+            )
+            self._conn.commit()
 
     def _topic_row(self, name: str) -> sqlite3.Row | None:
         return self._conn.execute("SELECT * FROM topics WHERE name = ?", (name,)).fetchone()
@@ -726,16 +740,21 @@ class Topic(Generic[ModelT]):
                     status=row["status"],
                     payload_hash=row["payload_hash"],
                     dedup_hash=row["dedup_hash"],
+                    parent_id=row["parent_id"],
                     data=model,
                 )
             else:
                 yield model
 
-    def _insert_payload(self, payload_dict: dict[str, Any]) -> None:
+    def _insert_payload(
+        self, payload_dict: dict[str, Any], *, parent_id: int | None = None
+    ) -> None:
         with self.source._conn:
-            self._insert_payload_in_current_transaction(payload_dict)
+            self._insert_payload_in_current_transaction(payload_dict, parent_id=parent_id)
 
-    def _insert_payload_in_current_transaction(self, payload_dict: dict[str, Any]) -> None:
+    def _insert_payload_in_current_transaction(
+        self, payload_dict: dict[str, Any], *, parent_id: int | None = None
+    ) -> None:
         topic_row = self.source._topic_row(self.name)
         if topic_row is None:
             raise KeyError(f"unknown topic: {self.name}")
@@ -748,9 +767,9 @@ class Topic(Generic[ModelT]):
                 """
                 INSERT INTO messages (
                     topic, payload_json, schema_hash, payload_hash,
-                    dedup_hash, created_at, status
+                    dedup_hash, parent_id, created_at, status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'new')
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'new')
                 """,
                 (
                     self.name,
@@ -758,6 +777,7 @@ class Topic(Generic[ModelT]):
                     schema_hash,
                     payload_hash,
                     dedup_hash,
+                    parent_id,
                     _utc_now(),
                 ),
             )
@@ -885,7 +905,9 @@ class Pipeline(Generic[ModelT, OutputT]):
                 continue
             target_payload = _model_to_payload(target_model)
             with source._conn:
-                self.target_topic._insert_payload_in_current_transaction(target_payload)
+                self.target_topic._insert_payload_in_current_transaction(
+                    target_payload, parent_id=record.id
+                )
                 source._conn.execute(
                     """
                     UPDATE messages
@@ -1097,7 +1119,9 @@ class FullPipeline:
                 for p, model in transforms:
                     if p.target_topic is not None and model is not None:
                         payload = _model_to_payload(model)
-                        p.target_topic._insert_payload_in_current_transaction(payload)
+                        p.target_topic._insert_payload_in_current_transaction(
+                            payload, parent_id=record.id
+                        )
                 source.source._conn.execute(
                     """
                     UPDATE messages
@@ -1137,7 +1161,7 @@ class FullPipeline:
                     try:
                         with source.source._conn:
                             p.target_topic._insert_payload_in_current_transaction(
-                                payload
+                                payload, parent_id=record.id
                             )
                     except DuplicateMessageError:
                         pass

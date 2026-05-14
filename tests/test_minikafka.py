@@ -490,3 +490,102 @@ def test_source_context_manager_closes_on_exception(tmp_path: Path):
 
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
+
+
+def test_append_record_has_no_parent_id():
+    src = Source(":memory:")
+    topic = src.topic("videos", Video, dedup=None)
+    topic.append({"creator": "a", "url": "u", "video_length_seconds": 10})
+
+    record = list(topic.iter_new(records=True))[0]
+    assert isinstance(record, Record)
+    assert record.parent_id is None
+
+
+def test_pipeline_sets_parent_id_on_target_record():
+    src = Source(":memory:")
+    videos = src.topic("videos", Video, dedup=None)
+    creators = src.topic("creators", Creator, dedup=None)
+    videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
+
+    source_record = list(videos.iter_new(records=True))[0]
+    assert isinstance(source_record, Record)
+
+    videos.pipe(lambda v: Creator(name=v.creator)).to(creators).run()
+
+    target_record = list(creators.iter_new(records=True))[0]
+    assert isinstance(target_record, Record)
+    assert target_record.parent_id == source_record.id
+
+
+def test_full_pipeline_sets_parent_id_on_fan_out():
+    src = Source(":memory:")
+    videos = src.topic("videos", Video, dedup=None)
+    creators = src.topic("creators", Creator, dedup=None)
+    short_videos = src.topic("short_videos", ShortVideo, dedup=None)
+
+    videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
+    source_record = list(videos.iter_new(records=True))[0]
+    assert isinstance(source_record, Record)
+
+    src.full_pipeline(
+        videos.pipe(lambda v: Creator(name=v.creator)).to(creators),
+        videos.pipe(lambda v: ShortVideo(creator=v.creator, url=v.url)).to(short_videos),
+    ).run()
+
+    creator_record = list(creators.iter_new(records=True))[0]
+    short_record = list(short_videos.iter_new(records=True))[0]
+    assert isinstance(creator_record, Record)
+    assert isinstance(short_record, Record)
+    assert creator_record.parent_id == source_record.id
+    assert short_record.parent_id == source_record.id
+
+
+def test_chained_pipeline_preserves_lineage():
+    src = Source(":memory:")
+    videos = src.topic("videos", Video, dedup=None)
+    creators = src.topic("creators", Creator, dedup=None)
+    videos.append({"creator": "a", "url": "u", "video_length_seconds": 10})
+
+    videos.pipe(lambda v: Creator(name=v.creator)).to(creators).run()
+
+    source_record = list(videos.iter_handled(records=True))[0]
+    target_record = list(creators.iter_new(records=True))[0]
+    assert isinstance(source_record, Record)
+    assert isinstance(target_record, Record)
+    assert source_record.parent_id is None
+    assert target_record.parent_id == source_record.id
+
+
+def test_existing_db_gets_parent_id_column(tmp_path):
+    db = tmp_path / "queue.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE topics (
+            name TEXT PRIMARY KEY,
+            schema_json TEXT NOT NULL,
+            schema_hash TEXT NOT NULL,
+            dedup_fields TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT NOT NULL REFERENCES topics(name),
+            payload_json TEXT NOT NULL,
+            schema_hash TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            dedup_hash TEXT,
+            created_at TEXT NOT NULL,
+            handled_at TEXT,
+            status TEXT NOT NULL DEFAULT 'new',
+            CHECK (status IN ('new', 'handled'))
+        );
+    """)
+    conn.close()
+
+    src = Source(db)
+    cols = {
+        row[1] for row in src._conn.execute("PRAGMA table_info(messages)").fetchall()
+    }
+    assert "parent_id" in cols
+    src.close()
