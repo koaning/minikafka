@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar, overload
 
 from pydantic import BaseModel
 
@@ -489,6 +489,15 @@ class Topic(Generic[ModelT]):
         self._insert_payload(payload_dict)
         return model
 
+    @overload
+    def iter_new(
+        self, *, records: Literal[True], as_dict: bool = ...
+    ) -> Iterator[Record[ModelT]]: ...
+    @overload
+    def iter_new(self, *, as_dict: Literal[True]) -> Iterator[dict[str, Any]]: ...
+    @overload
+    def iter_new(self, *, records: bool = ..., as_dict: bool = ...) -> Iterator[ModelT]: ...
+
     def iter_new(
         self, *, records: bool = False, as_dict: bool = False
     ) -> Iterator[ModelT | Record[ModelT] | dict[str, Any]]:
@@ -517,6 +526,15 @@ class Topic(Generic[ModelT]):
             ```
         """
         yield from self._iter(status="new", records=records, as_dict=as_dict)
+
+    @overload
+    def iter_handled(
+        self, *, records: Literal[True], as_dict: bool = ...
+    ) -> Iterator[Record[ModelT]]: ...
+    @overload
+    def iter_handled(self, *, as_dict: Literal[True]) -> Iterator[dict[str, Any]]: ...
+    @overload
+    def iter_handled(self, *, records: bool = ..., as_dict: bool = ...) -> Iterator[ModelT]: ...
 
     def iter_handled(
         self, *, records: bool = False, as_dict: bool = False
