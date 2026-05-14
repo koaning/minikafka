@@ -567,6 +567,35 @@ class Topic(Generic[ModelT]):
         self.source._conn.commit()
         self.source._emit("message_handled", topic=self.name, id=message_id)
 
+    def count(self, status: str | None = None) -> int:
+        """Return the number of records in this topic.
+
+        Args:
+            status: Optional filter — ``"new"``, ``"handled"``, or ``None``
+                (default) to count all records regardless of status.
+
+        Returns:
+            The record count as an integer.
+
+        Examples:
+            ```python
+            topic.count()            # all records
+            topic.count("new")       # only unhandled
+            topic.count("handled")   # only acknowledged
+            ```
+        """
+        if status is not None:
+            row = self.source._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE topic = ? AND status = ?",
+                (self.name, status),
+            ).fetchone()
+        else:
+            row = self.source._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE topic = ?",
+                (self.name,),
+            ).fetchone()
+        return row[0]
+
     def pipe(self, fn: Callable[[ModelT], Any]) -> Pipeline[ModelT, Any]:
         """Start building a pipeline that transforms this topic.
 
