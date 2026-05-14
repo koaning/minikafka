@@ -349,6 +349,9 @@ class Source:
         """
         return FullPipeline(list(pipelines))
 
+    def __repr__(self) -> str:
+        return f"Source({self.path!r})"
+
     def __enter__(self) -> Source:
         return self
 
@@ -453,6 +456,9 @@ class Topic(Generic[ModelT]):
         self.source = source
         self.name = name
         self.model = model
+
+    def __repr__(self) -> str:
+        return f"Topic({self.name!r}, {self.model.__name__})"
 
     def append(self, payload: ModelT | dict[str, Any]) -> ModelT:
         """Validate and insert a new record into the topic.
