@@ -682,17 +682,23 @@ class Topic(Generic[ModelT]):
                 ``pip install minikafka[polars]``.
             ValueError: A payload contains a nested collection.
         """
-        rows = list(self.iter_new(as_dict=True)) + list(self.iter_handled(as_dict=True))
-        for row in rows:
-            for key, value in row.items():
-                if isinstance(value, (dict, list, tuple)):
-                    raise ValueError(f"to_polars only supports flat payloads; {key!r} is nested")
         try:
             import polars as pl
         except ImportError as exc:
             raise ImportError(
                 "to_polars() requires the optional 'polars' dependency"
             ) from exc
+        rows = [
+            json.loads(row["payload_json"])
+            for row in self.source._conn.execute(
+                "SELECT payload_json FROM messages WHERE topic = ? ORDER BY id",
+                (self.name,),
+            )
+        ]
+        for row in rows:
+            for key, value in row.items():
+                if isinstance(value, (dict, list, tuple)):
+                    raise ValueError(f"to_polars only supports flat payloads; {key!r} is nested")
         return pl.DataFrame(rows)
 
     def _validate(self, payload: ModelT | dict[str, Any]) -> ModelT:
