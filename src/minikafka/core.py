@@ -405,18 +405,6 @@ class Source:
             """
         )
         self._conn.commit()
-        self._migrate_parent_id()
-
-    def _migrate_parent_id(self) -> None:
-        cols = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
-        if "parent_id" not in cols:
-            self._conn.execute(
-                "ALTER TABLE messages ADD COLUMN parent_id INTEGER REFERENCES messages(id)"
-            )
-            self._conn.commit()
 
     def _topic_row(self, name: str) -> sqlite3.Row | None:
         return self._conn.execute("SELECT * FROM topics WHERE name = ?", (name,)).fetchone()

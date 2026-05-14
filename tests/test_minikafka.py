@@ -557,35 +557,4 @@ def test_chained_pipeline_preserves_lineage():
     assert target_record.parent_id == source_record.id
 
 
-def test_existing_db_gets_parent_id_column(tmp_path):
-    db = tmp_path / "queue.sqlite"
-    conn = sqlite3.connect(str(db))
-    conn.executescript("""
-        CREATE TABLE topics (
-            name TEXT PRIMARY KEY,
-            schema_json TEXT NOT NULL,
-            schema_hash TEXT NOT NULL,
-            dedup_fields TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            topic TEXT NOT NULL REFERENCES topics(name),
-            payload_json TEXT NOT NULL,
-            schema_hash TEXT NOT NULL,
-            payload_hash TEXT NOT NULL,
-            dedup_hash TEXT,
-            created_at TEXT NOT NULL,
-            handled_at TEXT,
-            status TEXT NOT NULL DEFAULT 'new',
-            CHECK (status IN ('new', 'handled'))
-        );
-    """)
-    conn.close()
 
-    src = Source(db)
-    cols = {
-        row[1] for row in src._conn.execute("PRAGMA table_info(messages)").fetchall()
-    }
-    assert "parent_id" in cols
-    src.close()
