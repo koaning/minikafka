@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
@@ -998,7 +998,7 @@ class FullPipeline:
         self,
         *,
         dry_run: bool = False,
-        strategy: str = "strict",
+        strategy: Literal["strict", "best_effort"] = "strict",
     ) -> list[list[Any]]:
         """Execute the DAG.
 
