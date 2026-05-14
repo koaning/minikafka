@@ -315,9 +315,13 @@ class Source:
             )
         else:
             existing_dedup = tuple(json.loads(existing["dedup_fields"]))
-            if existing["schema_hash"] != schema_hash or existing_dedup != dedup_fields:
+            if existing["schema_hash"] != schema_hash:
                 raise SchemaMismatchError(
-                    f"topic exists with a different schema or dedup config: {name}"
+                    f"topic {name!r} exists with a different schema"
+                )
+            if existing_dedup != dedup_fields:
+                raise SchemaMismatchError(
+                    f"topic {name!r} exists with a different dedup config"
                 )
 
         self._models[name] = model
